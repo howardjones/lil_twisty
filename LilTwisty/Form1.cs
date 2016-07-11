@@ -9,36 +9,49 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
+using Microsoft.Win32;
 
 namespace LilTwisty
 {
 
     public partial class Form1 : Form
     {
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        enum KeyModifier
+        {
+            None = 0,
+            Alt = 1,
+            Control = 2,
+            Shift = 4,
+            WinKey = 8
+        }
+
+        public List<KnownDisplay> known_displays = new List<KnownDisplay>();
+        public Rectangle desktop_area = new Rectangle(0, 0, 0, 0);
+        public float display_scalefactor = 1.0F;
+        public int selected_display = -1;
+
         public Form1()
         {
             InitializeComponent();
+
+            RegisterHotKey(this.Handle, 0, (int)KeyModifier.Shift + (int)KeyModifier.WinKey, Keys.F9.GetHashCode());       // Register Win + Shift + F9 as global hotkey. 
+            RegisterHotKey(this.Handle, 1, (int)KeyModifier.Shift + (int)KeyModifier.WinKey, Keys.F10.GetHashCode());       // Register Win + Shift + F10 as global hotkey. 
+
         }
 
-        private void button1_Click(object sender, EventArgs e)
-        {
-            uint display_id = 9;                       
-            
-            RotateDisplay.go(display_id);
-
-            listBox1.Items.Clear();
-            update_listbox();
-        }
-
-        private void update_listbox()
+        public void repopulate_display_list()
         {
             DISPLAY_DEVICE d = new DISPLAY_DEVICE();
             DEVMODE dm = new DEVMODE();
             d.cb = Marshal.SizeOf(d);
 
-            List<Rectangle> displays = new List<Rectangle>();
-            List<Rectangle> scaled_displays = new List<Rectangle>();
-            Rectangle bounding = new Rectangle(0, 0, 0, 0);
+            known_displays.Clear();
+            int[] bounding_parts = new int[] { 0, 0, 0, 0 };
 
             for (uint i = 0; i < 100; i++)
             {
@@ -51,60 +64,96 @@ namespace LilTwisty
                 string label = "";
 
                 int res = NativeMethods.EnumDisplaySettings(
-                d.DeviceName, NativeMethods.ENUM_CURRENT_SETTINGS, ref dm);
+                    d.DeviceName, 
+                    NativeMethods.ENUM_CURRENT_SETTINGS, 
+                    ref dm);
 
                 if (res != 0)
                 {
                     POINTL pos = dm.dmPosition;
 
                     Rectangle display_bounding = new Rectangle(pos.x, pos.y, dm.dmPelsWidth, dm.dmPelsHeight);
-                    displays.Add(display_bounding);
+                    
+                    Console.WriteLine("DISPLAY {0}: {1}", i, display_bounding);
 
-                    label = string.Format("[{0}] {3} <{4}> {1} {2}", i, d.DeviceString, d.DeviceName, display_bounding, dm.dmDisplayOrientation);
-                    listBox1.Items.Add(label);
+                    label = string.Format("[{0}] {3} <{4}> {1}", i, d.DeviceString, d.DeviceName, display_bounding, dm.dmDisplayOrientation);
+                    // listBox1.Items.Add(label);
 
+                    KnownDisplay kd = new KnownDisplay();
+                    kd.display_id = i;
+                    kd.label = label;
+                    kd.bounding = display_bounding;
+                    kd.scaled = display_bounding;
+
+                    known_displays.Add(kd);
+
+                    bounding_parts[0] = Math.Min(display_bounding.Left, bounding_parts[0]);
+                    bounding_parts[1] = Math.Min(display_bounding.Top, bounding_parts[1]);
+                    bounding_parts[2] = Math.Max(display_bounding.Left + display_bounding.Width, bounding_parts[2]);
+                    bounding_parts[3] = Math.Max(display_bounding.Top + display_bounding.Height, bounding_parts[3]);
                 }
             }
-
-            int[] bounding_parts = new int[] { 0, 0, 0, 0 };
-
-            foreach (Rectangle r in displays)
-            {
-                bounding_parts[0] = Math.Min(r.Left, bounding_parts[0]);
-                bounding_parts[1] = Math.Min(r.Top, bounding_parts[1]);
-                bounding_parts[2] = Math.Max(r.Left + r.Width, bounding_parts[2]);
-                bounding_parts[3] = Math.Max(r.Top + r.Height, bounding_parts[3]);
-            }
-
-            bounding = new Rectangle(bounding_parts[0], bounding_parts[1], bounding_parts[2] - bounding_parts[0], bounding_parts[3] - bounding_parts[1]);
-            float scale_h = (float)bounding.Width / (float)panel1.Width;
-            float scale_v = (float)bounding.Height / (float)panel1.Height;
-            float scalefactor = Math.Max(scale_h, scale_v);
-
-            Console.WriteLine(bounding);
-            Console.WriteLine("{0} {1} => {2}", scale_h, scale_v, scalefactor);
-
-            foreach (Rectangle r in displays)
-            {
-                Rectangle new_r = new Rectangle(
-                        panel1.Left + (int)((float)r.Left / scalefactor),
-                        panel1.Top + (int)((float)r.Top / scalefactor),
-                        (int)((float)r.Width / scalefactor),
-                        (int)((float)r.Height / scalefactor)
-                    );
-                Console.WriteLine(new_r);
-                scaled_displays.Add(new_r);
-            }
+                        
+            desktop_area = new Rectangle(bounding_parts[0], bounding_parts[1], bounding_parts[2] - bounding_parts[0], bounding_parts[3] - bounding_parts[1]);
+            Console.WriteLine("DESKTOP: {0}", desktop_area);
+            float scale_h = (float)desktop_area.Width / (float)panel1.Width;
+            float scale_v = (float)desktop_area.Height / (float)panel1.Height;
             
+            display_scalefactor = Math.Max(scale_h, scale_v);
+            Console.WriteLine("{0} {1} => {2}", scale_h, scale_v, display_scalefactor);
+
+            // if the desktop extends either side of the origin, this will pull it all into view.
+            int origin_x = (int)((float)-desktop_area.Left / display_scalefactor);
+            int origin_y = (int)((float)-desktop_area.Top / display_scalefactor);
+
+            float scaled_height_diff = ((float)panel1.Height - (float)desktop_area.Height / display_scalefactor) / 2.0F;
+            float scaled_width_diff = ((float)panel1.Width - (float)desktop_area.Width/ display_scalefactor) / 2.0F;
+
+            Console.WriteLine("{0} {1}", scaled_width_diff, scaled_height_diff);
+
+            origin_x += (int)scaled_width_diff;
+            origin_y += (int)scaled_height_diff;
+
+            for (int x=0; x < known_displays.Count; x++)
+            {
+                KnownDisplay kd = known_displays[x];
+                
+                Rectangle new_r = new Rectangle(
+                        origin_x + (int)((float)kd.bounding.Left / display_scalefactor),
+                        origin_y + (int)((float)kd.bounding.Top / display_scalefactor),
+                        (int)((float)kd.bounding.Width / display_scalefactor),
+                        (int)((float)kd.bounding.Height / display_scalefactor)
+                    );
+
+                Console.WriteLine("SCALED: {0}", new_r);
+                kd.scaled = new_r;
+                known_displays[x] = kd;                               
+            }
+        }
+
+        private void saveSettings()
+        {            
+            
+        }
+
+        private void loadSettings()
+        {
+         
+        }
+
+        private void twistButton_Click(object sender, EventArgs e)
+        {
+            if (selected_display >= 0)
+            {
+                RotateDisplay.go((uint)selected_display);
+                repopulate_display_list();
+            }            
         }
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            listBox1.Items.Clear();
-            update_listbox();
-                        
-
-
+            loadSettings();
+            repopulate_display_list();            
         }
 
         private void Form1_Resize(object sender, EventArgs e)
@@ -120,11 +169,111 @@ namespace LilTwisty
             this.Show();
             this.WindowState = FormWindowState.Normal;
         }
+
+        private void panel1_Paint(object sender, PaintEventArgs e)
+        {
+            Console.WriteLine("Repaint");
+            
+            foreach (KnownDisplay kd in known_displays)
+            {                
+                Console.WriteLine("Drawing: {0} {1}", kd.scaled, kd.label);
+
+                Rectangle draw = kd.scaled;
+                Point centre_point = new Point(draw.Width / 2 + draw.Left, draw.Height / 2 + draw.Top);
+                String label = String.Format("{0}", kd.display_id);
+
+                if (kd.display_id == selected_display)
+                {
+                    e.Graphics.FillRectangle(Brushes.White, draw);
+                    e.Graphics.DrawString(label, SystemFonts.CaptionFont, Brushes.Black, centre_point);
+                } else
+                {
+                    e.Graphics.FillRectangle(Brushes.LightGray, draw);
+                    e.Graphics.DrawString(label, SystemFonts.SmallCaptionFont, Brushes.Black, centre_point);
+                }
+                e.Graphics.DrawRectangle(Pens.Black, draw);                
+            }
+            
+        }
+
+        private void Form1_KeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape)
+            {
+                this.Close();
+            }
+        }
+
+        private void Form1_Shown(object sender, EventArgs e)
+        {
+            repopulate_display_list();
+        }
+
+        private void panel1_MouseClick(object sender, MouseEventArgs e)
+        {
+            selected_display = -1;
+            foreach (KnownDisplay kd in known_displays)
+            {
+                if (kd.scaled.Contains(e.Location)) {
+                    selected_display = (int)kd.display_id;
+                    Console.WriteLine("Selected new display: {0}", selected_display);
+                }
+            }
+
+            panel1.Invalidate();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+
+            if (m.Msg == 0x0312)
+            {
+                /* Note that the three lines below are not needed if you only want to register one hotkey.
+                 * The below lines are useful in case you want to register multiple keys, which you can use a switch with the id as argument, or if you want to know which key/modifier was pressed for some particular reason. */
+
+                Keys key = (Keys)(((int)m.LParam >> 16) & 0xFFFF);                  // The key of the hotkey that was pressed.
+                KeyModifier modifier = (KeyModifier)((int)m.LParam & 0xFFFF);       // The modifier of the hotkey that was pressed.
+                int id = m.WParam.ToInt32();                                        // The id of the hotkey that was pressed.
+                
+                Console.WriteLine("Hotkey {0} was pressed", id);
+                // do something
+
+                if (selected_display >= 0)
+                {
+                    if (id == 1)
+                    {
+                        RotateDisplay.set_rotation((uint)selected_display, NativeMethods.DMDO_90);
+                    }
+                    if (id == 0)
+                    {
+                        RotateDisplay.set_rotation((uint)selected_display, NativeMethods.DMDO_DEFAULT);
+                    }
+
+                    repopulate_display_list();
+                }
+            }
+        }
+
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            saveSettings();
+            UnregisterHotKey(this.Handle, 0);       // Unregister hotkey with id 0 before closing the form. 
+            UnregisterHotKey(this.Handle, 1);       // Unregister hotkey with id 1 before closing the form. 
+        }
     }
+
+    public struct KnownDisplay
+    {
+        public Rectangle bounding;
+        public Rectangle scaled;
+        public uint display_id;
+        public String label;
+    };
 
     class RotateDisplay
     {
-        public static void go(uint deviceID)
+        public static void set_rotation(uint deviceID, int newOrientation)
         {
             // uint deviceID = 1; // zero origin (i.e. 1 means DISPLAY2)
 
@@ -132,16 +281,10 @@ namespace LilTwisty
             DEVMODE dm = new DEVMODE();
             d.cb = Marshal.SizeOf(d);
 
-            Console.WriteLine("Finding displays");
             NativeMethods.EnumDisplayDevices(null, deviceID, ref d, 0);
-
-            Console.WriteLine(d);
-            Console.WriteLine(d.DeviceString);
 
             int res = NativeMethods.EnumDisplaySettings(
                 d.DeviceName, NativeMethods.ENUM_CURRENT_SETTINGS, ref dm);
-
-            Console.WriteLine(res);
 
             if (0 != res)
             {
@@ -149,9 +292,32 @@ namespace LilTwisty
                 dm.dmPelsHeight = dm.dmPelsWidth;
                 dm.dmPelsWidth = temp;
 
-                Console.WriteLine(dm.dmPelsHeight);
-                Console.WriteLine(dm.dmPelsWidth);
-                Console.WriteLine(dm.dmDisplayOrientation);
+                dm.dmDisplayOrientation = newOrientation;
+
+                DISP_CHANGE iRet = NativeMethods.ChangeDisplaySettingsEx(
+                    d.DeviceName, ref dm, IntPtr.Zero,
+                    DisplaySettingsFlags.CDS_UPDATEREGISTRY, IntPtr.Zero);             
+            }
+        }
+
+        public static void go(uint deviceID)
+        {
+            // uint deviceID = 1; // zero origin (i.e. 1 means DISPLAY2)
+
+            DISPLAY_DEVICE d = new DISPLAY_DEVICE();
+            DEVMODE dm = new DEVMODE();
+            d.cb = Marshal.SizeOf(d);
+            
+            NativeMethods.EnumDisplayDevices(null, deviceID, ref d, 0);
+            
+            int res = NativeMethods.EnumDisplaySettings(
+                d.DeviceName, NativeMethods.ENUM_CURRENT_SETTINGS, ref dm);
+            
+            if (0 != res)
+            {
+                int temp = dm.dmPelsHeight;
+                dm.dmPelsHeight = dm.dmPelsWidth;
+                dm.dmPelsWidth = temp;
 
                 switch (dm.dmDisplayOrientation)
                 {
