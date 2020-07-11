@@ -10,3 +10,4 @@ Currently has Win+Shift+F9 and Win+Shift+F10 hardcoded as the global hotkeys to 
 and the monitor rotations are also hardcoded. Obviously it should be able to learn which two
 states it should actually flip between (e.g. on my setup it's currently landscape and flipped-portrait, not portrait).
 
+There's a little demo of my old prototype here: https://www.youtube.com/watch?v=cmyg2kOT8lQ
